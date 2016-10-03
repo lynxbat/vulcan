@@ -15,7 +15,6 @@
 package cmd
 
 import (
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -23,15 +22,12 @@ import (
 	"sync"
 	"syscall"
 
-	"google.golang.org/grpc"
-
 	"github.com/digitalocean/vulcan/forwarder"
 	"github.com/digitalocean/vulcan/kafka"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -76,18 +72,6 @@ func Forwarder() *cobra.Command {
 			fwd := forwarder.NewForwarder(&forwarder.Config{
 				Writer: w,
 			})
-
-			err = reg.Register(fwd)
-			if err != nil {
-				return err
-			}
-
-			d := forwarder.NewDecompressor()
-
-			lis, err := net.Listen("tcp", viper.GetString(flagAddress))
-			if err != nil {
-				return err
-			}
 			// start both gRPC and http servers and return as soon as either of them have an
 			// error. It is expected that these two servers will either return an error, or run
 			// indefinitely. This will be easier to handle when Prometheus moves away from gRPC
@@ -95,13 +79,13 @@ func Forwarder() *cobra.Command {
 			errCh := make(chan error)
 			once := sync.Once{}
 			go func() {
-				server := grpc.NewServer(grpc.RPCDecompressor(d))
-				remote.RegisterWriteServer(server, fwd)
+				http.Handle("/", forwarder.WriteHandler(fwd, "snappy"))
 
 				log.WithFields(log.Fields{
 					"listening_address": viper.GetString(flagAddress),
-				}).Info("starting vulcan forwarder gRPC service")
-				if err := server.Serve(lis); err != nil {
+				}).Info("starting vulcan forwarder http service")
+
+				if err := http.ListenAndServe(viper.GetString(flagAddress), nil); err != nil {
 					once.Do(func() {
 						errCh <- err
 					})
@@ -112,7 +96,9 @@ func Forwarder() *cobra.Command {
 					"listening_address": viper.GetString(flagWebListenAddress),
 					"telemetry_path":    viper.GetString(flagTelemetryPath),
 				}).Info("starting http server for telemetry")
+
 				http.Handle(viper.GetString(flagTelemetryPath), promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+
 				if err := http.ListenAndServe(viper.GetString(flagWebListenAddress), nil); err != nil {
 					once.Do(func() {
 						errCh <- err
